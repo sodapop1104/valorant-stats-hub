@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import CookieBanner from "@/components/CookieBanner";
 
 export const metadata: Metadata = {
   title: "Valorant Stats Hub",
@@ -22,10 +23,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <a className="hover:text-valorant-accent" href="/leaderboards">Leaderboards</a>
             </nav>
           </header>
+          <CookieBanner />
           {children}
-          <footer className="mt-12 text-xs opacity-70">
-            <p>Unofficial fan project. Not endorsed by Riot Games. Valorant © Riot Games.</p>
-            <p><a className="underline" href="/legal/privacy">Privacy</a> · <a className="underline" href="/legal/terms">Terms</a></p>
+          <footer className="mt-12 text-xs opacity-80">
+            <p> Unofficial fan project. Not endorsed by Riot Games. VALORANT © Riot Games. This site uses Riot Games APIs but is not endorsed and/or certified by Riot Games.</p>
+            <p className="mt-1">We fetch gameplay stats with your consent and process them server-side. We do not expose your API token or store sensitive personal data beyond what’s required to render analytics. You can request deletion of any stored data at any time.</p>
+            <p className="mt-1">
+              <a className="underline" href="/legal/privacy">Privacy</a> ·{" "}
+              <a className="underline" href="/legal/terms">Terms</a> ·{" "}
+              <a className="underline" href="/legal/privacy#ccpa">Do Not Sell/Share (CA)</a> ·{" "}
+              <a className="underline" href="/legal/privacy#contact">Contact</a></p>
           </footer>
         </div>
       </body>
