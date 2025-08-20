@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 
+const CLUSTERS = ["americas", "europe", "asia"] as const;
 const VAL_SHARDS = ["na","eu","ap","kr","latam","br","jp"] as const;
 
 async function riotGet<T>(url: string) {
@@ -9,27 +10,68 @@ async function riotGet<T>(url: string) {
   return res.json() as Promise<T>;
 }
 
+async function toPuuidFromRiotId(riotId: string): Promise<{ puuid: string; cluster: string }> {
+  const [nameRaw, tagRaw] = riotId.split("#");
+  const name = nameRaw?.trim();
+  const tag = tagRaw?.trim();
+  if (!name || !tag) throw new Error("Use Riot ID like GameName#Tag");
+
+  for (const c of CLUSTERS) {
+    try {
+      const acct = await riotGet<{ puuid: string }>(
+        `https://${c}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(name)}/${encodeURIComponent(tag)}`
+      );
+      return { puuid: acct.puuid, cluster: c };
+    } catch {}
+  }
+  throw new Error("Account not found for that Riot ID");
+}
+
+async function activeShardFor(puuid: string, hintCluster?: string): Promise<string> {
+  const order = hintCluster
+    ? [hintCluster, ...CLUSTERS.filter((x) => x !== hintCluster)]
+    : [...CLUSTERS];
+
+  for (const c of order) {
+    try {
+      const dto: any = await riotGet(
+        `https://${c}.api.riotgames.com/riot/account/v1/active-shards/by-game/val/by-puuid/${puuid}`
+      );
+      const shard = dto?.activeShard ?? dto?.active_shard ?? dto?.shard;
+      if (shard && VAL_SHARDS.includes(shard)) return shard;
+    } catch {}
+  }
+  return "na";
+}
+
 type Pt = { t: string; kd?: number; hs?: number; win?: number };
 
 export async function POST(req: Request) {
   try {
     const reqBody: any = await req.json().catch(() => ({}));
-
     const sessionRaw = cookies().get("RSO_SESSION")?.value;
     const session = sessionRaw ? JSON.parse(sessionRaw) : null;
 
-    const puuid: string | undefined = session?.puuid ?? reqBody?.puuid;
-    if (!puuid) return NextResponse.json({ error: "Missing puuid (sign in required)" }, { status: 400 });
+    // 1) Find the PUUID
+    let puuid: string | undefined = session?.puuid ?? reqBody?.puuid;
+    let hintCluster: string | undefined;
 
-    let shard: string | undefined = session?.shard;
-    if (!shard) {
-      const dto: any = await riotGet(
-        `https://americas.api.riotgames.com/riot/account/v1/active-shards/by-game/val/by-puuid/${puuid}`
-      );
-      shard = dto?.activeShard ?? dto?.active_shard ?? dto?.shard ?? "na";
+    if (!puuid && reqBody?.riotId) {
+      const out = await toPuuidFromRiotId(String(reqBody.riotId));
+      puuid = out.puuid;
+      hintCluster = out.cluster;
     }
+
+    if (!puuid) {
+      return NextResponse.json({ error: "Missing puuid (sign in or pass a riotId/puuid)" }, { status: 400 });
+    }
+
+    // 2) Shard
+    let shard: string | undefined = session?.shard;
+    if (!shard) shard = await activeShardFor(puuid, hintCluster);
     if (!VAL_SHARDS.includes(shard as any)) shard = "na";
 
+    // 3) Matchlist (403 → soft response)
     let matchlist: any;
     try {
       matchlist = await riotGet(`https://${shard}.api.riotgames.com/val/match/v1/matchlists/by-puuid/${puuid}`);
@@ -37,7 +79,7 @@ export async function POST(req: Request) {
       if (String(e).includes("403")) {
         return NextResponse.json({
           kd: [], hs: [], win: [], puuid, shard,
-          notice: "This API key isn’t approved for VAL match history. Login succeeded; request production/partner access."
+          notice: "API key not approved for VAL match history. Login works; request production/partner access."
         });
       }
       throw e;
@@ -45,6 +87,7 @@ export async function POST(req: Request) {
 
     const ids = (matchlist.history ?? []).slice(0, 16).map((h: any) => h.matchId).reverse();
 
+    // 4) Build time series
     const kd: Pt[] = [], hs: Pt[] = [], win: Pt[] = [];
     let i=1;
     for (const id of ids) {
