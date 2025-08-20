@@ -1,78 +1,79 @@
 import { NextResponse } from "next/server";
-import { resolveAccountCluster, resolveValorantRegion } from "@/lib/regions";
+const CLUSTERS = ["americas", "europe", "asia"] as const;
+const VAL_SHARDS = ["na","eu","ap","kr","latam","br","jp"] as const;
 
-function parseRiotId(input: string): [string, string] {
-  const parts = input.split("#");
-  if (parts.length < 2) throw new Error("Use Riot ID like GameName#Tag");
-  return [parts[0], parts[1]];
+function looksLikePuuid(x: string) { return /^[0-9a-fA-F-]{32,36}$/.test(x); }
+async function riotGet<T>(url: string) {
+  const res = await fetch(url, { headers: { "X-Riot-Token": process.env.RIOT_API_KEY! }, next: { revalidate: 300 }});
+  if (!res.ok) throw new Error(`Riot ${res.status}: ${await res.text()}`);
+  return res.json() as Promise<T>;
 }
-
-async function riotGet<T>(url: string, key?: string): Promise<T> {
-  const res = await fetch(url, {
-    headers: { "X-Riot-Token": key ?? process.env.RIOT_API_KEY! },
-    next: { revalidate: 300 },
-  });
-  if (!res.ok) throw new Error(`Riot API error ${res.status}: ${await res.text()}`);
-  return res.json();
+async function toPuuid(input: string){ /* identical to summary’s */ 
+  input = input.trim();
+  if (looksLikePuuid(input)) return { puuid: input, cluster: "americas" };
+  const [name, tag] = input.split("#"); if (!name || !tag) throw new Error("Use Riot ID like GameName#Tag");
+  for (const c of CLUSTERS) { try {
+    const acct = await riotGet<{ puuid: string }>(
+      `https://${c}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(name)}/${encodeURIComponent(tag)}`
+    ); return { puuid: acct.puuid, cluster: c };
+  } catch {} } throw new Error("Account not found");
+}
+async function getShard(cluster:string, puuid:string){
+  for (const c of [cluster, ...CLUSTERS.filter(x=>x!==cluster)]) {
+    try {
+      const dto:any = await riotGet(`https://${c}.api.riotgames.com/riot/account/v1/active-shards/by-game/val/by-puuid/${puuid}`);
+      const shard = dto?.activeShard ?? dto?.active_shard ?? dto?.shard;
+      if (shard && (VAL_SHARDS as readonly string[]).includes(shard)) return shard;
+    } catch {}
+  }
+  return "na";
 }
 
 type Pt = { t: string; kd?: number; hs?: number; win?: number };
 
 export async function POST(req: Request) {
   try {
-    const { riotId } = await req.json() as { riotId?: string };
+    const { riotId } = (await req.json()) as { riotId?: string };
     if (!riotId) return NextResponse.json({ error: "riotId required" }, { status: 400 });
 
-    const [gameName, tagLine] = parseRiotId(riotId);
-    const cluster = resolveAccountCluster(tagLine);
-    const region = resolveValorantRegion(tagLine);
-
-    const acct = await riotGet<{ puuid: string }>(
-      `https://${cluster}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`
-    );
+    const { puuid, cluster } = await toPuuid(riotId);
+    const shard = await getShard(cluster, puuid);
 
     const matchlist = await riotGet<{ history: { matchId: string }[] }>(
-      `https://${region}.api.riotgames.com/val/match/v1/matchlists/by-puuid/${acct.puuid}`
+      `https://${shard}.api.riotgames.com/val/match/v1/matchlists/by-puuid/${puuid}`
     );
+    const ids = (matchlist.history ?? []).slice(0, 16).map(h => h.matchId).reverse();
 
-    const ids = (matchlist.history ?? []).slice(0, 16).map(h => h.matchId);
-
-    const kd: Pt[] = [];
-    const hs: Pt[] = [];
-    const win: Pt[] = [];
-
-    // newest first → reverse so charts go left→right in time
-    const idsChrono = [...ids].reverse();
-
+    const kd: Pt[] = [], hs: Pt[] = [], win: Pt[] = [];
     let i = 1;
-    for (const id of idsChrono) {
-      const match = await riotGet<any>(`https://${region}.api.riotgames.com/val/match/v1/matches/${id}`);
-      const players = match.players?.allPlayers ?? match.players ?? match.players?.data ?? [];
-      const me = Array.isArray(players) ? players.find((p: any) => p.puuid === acct.puuid) : undefined;
-      if (!me) { i++; continue; }
+    for (const id of ids) {
+      try {
+        const match:any = await riotGet(`https://${shard}.api.riotgames.com/val/match/v1/matches/${id}`);
+        const players = match?.players?.allPlayers ?? match?.players?.data ?? match?.players ?? [];
+        const me = Array.isArray(players) ? players.find((p:any)=>p.puuid===puuid) : undefined;
+        if (!me) { i++; continue; }
+        const st = me.stats ?? me.playerStats ?? me;
+        const k=st.kills??0, d=st.deaths??0;
+        const hsC=st.headshots ?? st.headShots ?? 0;
+        const bsC=st.bodyshots ?? st.bodyShots ?? 0;
+        const lsC=st.legshots  ?? st.legShots  ?? 0;
+        const shots = hsC+bsC+lsC;
 
-      const stats = me.stats ?? me.playerStats ?? me;
-      const k = stats.kills ?? 0;
-      const d = stats.deaths ?? 0;
-      const hsC = stats.headshots ?? stats.headShots ?? 0;
-      const bsC = stats.bodyshots ?? stats.bodyShots ?? 0;
-      const lsC = stats.legshots ?? stats.legShots ?? 0;
-      const shots = hsC + bsC + lsC;
+        const myTeam = me.teamId ?? me.team;
+        const teams = match?.teams?.data ?? match?.teams ?? [];
+        const t = Array.isArray(teams) ? teams.find((x:any)=>
+          (x.teamId ?? x.team)?.toString().toUpperCase()===myTeam?.toString().toUpperCase()
+        ) : undefined;
 
-      const myTeam = me.teamId ?? me.team;
-      const teams = match.teams ?? match.teams?.data ?? [];
-      const t = Array.isArray(teams) ? teams.find((x: any) =>
-        (x.teamId ?? x.team)?.toString().toUpperCase() === myTeam?.toString().toUpperCase()
-      ) : undefined;
-
-      kd.push({ t: `M${i}`, kd: d > 0 ? k / d : k });
-      hs.push({ t: `M${i}`, hs: shots > 0 ? hsC / shots : 0 });
-      win.push({ t: `M${i}`, win: (t?.won === true || t?.hasWon === true) ? 1 : 0 });
-      i++;
+        kd.push({ t: `M${i}`, kd: d>0 ? k/d : k });
+        hs.push({ t: `M${i}`, hs: shots>0 ? hsC/shots : 0 });
+        win.push({ t: `M${i}`, win: (t?.won===true || t?.hasWon===true) ? 1 : 0 });
+        i++;
+      } catch { i++; }
     }
 
-    return NextResponse.json({ kd, hs, win });
-  } catch (e: any) {
+    return NextResponse.json({ kd, hs, win, puuid, shard });
+  } catch (e:any) {
     return NextResponse.json({ error: e?.message ?? "unknown error" }, { status: 500 });
   }
 }
