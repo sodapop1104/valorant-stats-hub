@@ -1,34 +1,30 @@
-// middleware.ts
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 const ENABLE_LOCK = process.env.SITE_LOCK === "1";
-const PASS = process.env.SITE_PASSWORD || "";
 
 export function middleware(req: NextRequest) {
   if (!ENABLE_LOCK) return NextResponse.next();
 
   const { pathname } = req.nextUrl;
 
-  // allow the unlock API, Next internals, and common static files
+  // allow unlock API and static/internals
   if (
     pathname.startsWith("/api/__unlock") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon") ||
     pathname.startsWith("/robots.txt") ||
-    pathname.startsWith("/sitemap")
+    pathname.startsWith("/sitemap") ||
+    pathname === "/riot.txt"
   ) {
     return NextResponse.next();
   }
 
-  // already unlocked?
-  const headerPass = req.headers.get("x-site-pass");
-  const cookiePass = req.cookies.get("site-pass")?.value;
-  if (PASS && (headerPass === PASS || cookiePass === PASS)) {
-    return NextResponse.next();
-  }
+  // ✅ already unlocked?
+  const unlocked = req.cookies.get("site-unlocked")?.value === "1";
+  if (unlocked) return NextResponse.next();
 
-  // prompt for password
+  // show prompt
   const html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body{background:#0a0a0a;color:#eee;font-family:ui-sans-serif,system-ui;padding:2rem}
@@ -49,5 +45,4 @@ export function middleware(req: NextRequest) {
   });
 }
 
-// run on everything except the unlock endpoint (extra safety)
 export const config = { matcher: ["/((?!api/__unlock).*)"] };
